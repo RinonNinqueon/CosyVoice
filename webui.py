@@ -23,7 +23,7 @@ import librosa
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append('{}/third_party/Matcha-TTS'.format(ROOT_DIR))
 from cosyvoice.cli.cosyvoice import AutoModel
-from cosyvoice.utils.file_utils import logging
+from cosyvoice.utils.file_utils import logging, load_wav
 from cosyvoice.utils.common import set_all_random_seed
 
 inference_mode_list = ['Pre-trained Voice', '3s Fast Reproduction', 'Cross-lingual Reproduction', 'Natural Language Control']
@@ -34,6 +34,7 @@ instruct_dict = {'Pre-trained Voice': '1. Select a pre-trained voice\n2. Click t
 stream_mode_list = [('No', False), ('Yes', True)]
 max_val = 0.8
 
+INSTRUCTION = "You are a helpful assistant."
 
 def generate_seed():
     seed = random.randint(1, 100000000)
@@ -41,6 +42,19 @@ def generate_seed():
         "__type__": "update",
         "value": seed
     }
+
+def postprocess(wav, top_db=60, hop_length=220, win_length=440):
+    speech = load_wav(wav, target_sr=cosyvoice.sample_rate, min_sr=16000)
+    speech, _ = librosa.effects.trim(
+        speech, top_db=top_db,
+        frame_length=win_length,
+        hop_length=hop_length
+    )
+    if speech.abs().max() > max_val:
+        speech = speech / speech.abs().max() * max_val
+    speech = torch.concat([speech, torch.zeros(1, int(cosyvoice.sample_rate * 0.2))], dim=1)
+    torchaudio.save(wav, speech, cosyvoice.sample_rate)
+    return wav
 
 
 def change_instruction(mode_checkbox_group):
@@ -100,8 +114,9 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
             yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
     elif mode_checkbox_group == '3s Fast Reproduction':
         logging.info('get zero_shot inference request')
+        new_promt = f"{INSTRUCTION} {instruct_text}<|endofprompt|> {prompt_text}"
         set_all_random_seed(seed)
-        for i in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_wav, stream=stream, speed=speed):
+        for i in cosyvoice.inference_zero_shot(tts_text, new_promt, prompt_wav, stream=stream, speed=speed):
             yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
     elif mode_checkbox_group == 'Cross-lingual Reproduction':
         logging.info('get cross_lingual inference request')
@@ -111,7 +126,7 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
     else:
         logging.info('get instruct inference request')
         set_all_random_seed(seed)
-        for i in cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=stream, speed=speed):
+        for i in cosyvoice.inference_instruct2(tts_text, instruct_text, postprocess(prompt_wav), stream=stream, speed=speed):
             yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
 
 
@@ -138,7 +153,7 @@ def main():
 
         generate_button = gr.Button("Generate Audio")
 
-        audio_output = gr.Audio(label="Synthesized Audio", autoplay=True, streaming=True)
+        audio_output = gr.Audio(label="Synthesized Audio", autoplay=True, streaming=False)
 
         seed_button.click(generate_seed, inputs=[], outputs=seed)
         generate_button.click(generate_audio,
